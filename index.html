@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Banana Picker</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Bananas">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; manifest-src 'self'; connect-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0F130D">
+<meta name="color-scheme" content="dark">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<style>
+/* Layout: full-screen camera app. Slim header with Scan/Train/Data, live video stage with a
+   movable reticle, and a bottom sheet that carries the verdict and the actions. Dark only,
+   because it is used under bright store lights and the video is the star. */
+:root {
+  --font-display: "Avenir Next Condensed", "Avenir Next", "Arial Narrow", system-ui, sans-serif;
+  --font-body: -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --bg: #0F130D; --panel: #171D13; --ink: #EEF1E4; --muted: #9AA38E; --line: #2B3326;
+  --btn: #EEF1E4; --btn-ink: #0F130D; --focus: #7AB2F5;
+  --c-today: #F0BE1B; --c-tomorrow: #B3CF3A; --c-dayafter: #6DBE68; --c-skip: #F08277; --c-brown: #C08A55; --c-none: #5A6350;
+  --bg-today: #4A3A08;    --ink-today: #FFE08A;
+  --bg-tomorrow: #3A4311; --ink-tomorrow: #DDEB9A;
+  --bg-dayafter: #1D3D1E; --ink-dayafter: #BFE3BB;
+  --bg-skip: #4D1B17;     --ink-skip: #FFC7C1;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); overscroll-behavior: none; }
+body { font-family: var(--font-body); font-size: 16px; line-height: 1.4; }
+#app {
+  height: 100%; display: flex; flex-direction: column;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+.top { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 14px; flex: 0 0 auto; }
+h1 { font-family: var(--font-display); font-weight: 800; font-size: 24px; letter-spacing: 0.01em; margin: 0; }
+.seg { display: inline-flex; border: 1.5px solid var(--ink); border-radius: 10px; overflow: hidden; }
+.seg button { font: 600 14px var(--font-body); min-height: 38px; padding: 0 14px; background: transparent; color: var(--ink); border: 0; }
+.seg button[aria-pressed="true"] { background: var(--btn); color: var(--btn-ink); }
+button { cursor: pointer; }
+button:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+.stagewrap { flex: 1 1 auto; min-height: 0; padding: 0 10px; }
+.stage { position: relative; height: 100%; border-radius: 16px; overflow: hidden; background: #000; border: 1.5px solid var(--line); }
+#video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+.reticle {
+  position: absolute; border: 4px solid var(--c-none); border-radius: 16px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.38); pointer-events: none;
+  transition: border-color 0.15s ease;
+}
+.reticle[data-verdict="today"] { border-color: var(--c-today); }
+.reticle[data-verdict="tomorrow"] { border-color: var(--c-tomorrow); }
+.reticle[data-verdict="dayafter"] { border-color: var(--c-dayafter); }
+.reticle[data-verdict="skip"] { border-color: var(--c-skip); }
+.reticle.pending { border-style: dashed; }
+.reticle.flash { animation: flash 0.35s ease; }
+@keyframes flash { 0% { box-shadow: 0 0 0 9999px rgba(255, 255, 255, 0.55); } 100% { box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.38); } }
+@media (prefers-reduced-motion: reduce) { .reticle { transition: none; } .reticle.flash { animation: none; } }
+.sizebtns { position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.sizebtns button {
+  width: 46px; height: 46px; border-radius: 12px; border: 1.5px solid var(--ink);
+  background: rgba(15, 19, 13, 0.7); color: var(--ink); font: 700 24px var(--font-body); line-height: 1;
+}
+.chip {
+  position: absolute; left: 10px; top: 10px; max-width: calc(100% - 80px);
+  font: 700 13px var(--font-body); padding: 7px 10px; border-radius: 8px; background: var(--btn); color: var(--btn-ink);
+}
+.startcard {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: 24px; text-align: center; background: rgba(15, 19, 13, 0.92);
+}
+.startcard h2 { margin: 0; font-family: var(--font-display); font-weight: 800; font-size: 30px; line-height: 1.05; }
+.startcard p { margin: 0; color: var(--muted); max-width: 32ch; }
+.startcard .err { color: var(--ink-skip); font-weight: 600; }
+.btn {
+  font: 700 17px var(--font-body); min-height: 52px; padding: 0 22px; border-radius: 12px;
+  border: 1.5px solid var(--ink); background: transparent; color: var(--ink);
+}
+.btn.primary { background: var(--btn); color: var(--btn-ink); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.link { font: 600 14px var(--font-body); background: none; border: 0; color: var(--ink); text-decoration: underline; padding: 8px 4px; min-height: 40px; }
+
+.sheet {
+  --v-bg: var(--panel); --v-ink: var(--ink);
+  flex: 0 0 auto; margin: 10px; padding: 12px 14px 14px; border-radius: 16px;
+  background: var(--v-bg); color: var(--v-ink); border: 1.5px solid var(--line);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.sheet[data-verdict="today"] { --v-bg: var(--bg-today); --v-ink: var(--ink-today); border-color: var(--c-today); }
+.sheet[data-verdict="tomorrow"] { --v-bg: var(--bg-tomorrow); --v-ink: var(--ink-tomorrow); border-color: var(--c-tomorrow); }
+.sheet[data-verdict="dayafter"] { --v-bg: var(--bg-dayafter); --v-ink: var(--ink-dayafter); border-color: var(--c-dayafter); }
+.sheet[data-verdict="skip"] { --v-bg: var(--bg-skip); --v-ink: var(--ink-skip); border-color: var(--c-skip); }
+.vhead { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.v-kicker { margin: 0; font: 700 11px var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.8; }
+.v-lock { font: 700 11px var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; }
+.v-title { margin: 0; font-family: var(--font-display); font-weight: 800; font-size: 34px; line-height: 1; text-wrap: balance; }
+.v-title.pending { opacity: 0.7; }
+.v-why { margin: 0; font-size: 15px; }
+.v-note { margin: 0; font-size: 14px; font-weight: 600; }
+.meters { display: grid; gap: 5px; }
+.meter { display: grid; grid-template-columns: 48px 1fr 46px; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.meter output { text-align: right; font-variant-numeric: tabular-nums; }
+.track { position: relative; height: 9px; border-radius: 5px; background: rgba(127, 127, 127, 0.3); overflow: hidden; }
+.fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 5px; }
+.fill.y { background: var(--c-today); } .fill.g { background: var(--c-dayafter); } .fill.b { background: var(--c-brown); }
+.tick { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--v-ink); opacity: 0.85; }
+.actions { display: flex; gap: 8px; }
+.actions .btn { flex: 1 1 auto; }
+.slots { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.slot { border: 1.5px dashed var(--line); border-radius: 10px; padding: 6px 8px; min-width: 0; color: var(--v-ink); }
+.slot b { display: block; font-size: 14px; } .slot span { font-size: 12px; opacity: 0.8; }
+.slot.full { border-style: solid; background: rgba(238, 241, 228, 0.16); border-color: var(--v-ink); }
+.basket-note { margin: 0; font-size: 14px; font-weight: 600; }
+.labels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.lab { min-height: 52px; border-radius: 12px; border: 1.5px solid; font: 700 16px var(--font-body); }
+.lab:disabled { opacity: 0.35; cursor: not-allowed; }
+.lab[data-label="today"] { background: var(--bg-today); color: var(--ink-today); border-color: var(--c-today); }
+.lab[data-label="tomorrow"] { background: var(--bg-tomorrow); color: var(--ink-tomorrow); border-color: var(--c-tomorrow); }
+.lab[data-label="dayafter"] { background: var(--bg-dayafter); color: var(--ink-dayafter); border-color: var(--c-dayafter); }
+.lab[data-label="reject"] { background: var(--bg-skip); color: var(--ink-skip); border-color: var(--c-skip); }
+.status { margin: 0; font-size: 14px; min-height: 1.3em; color: var(--v-ink); }
+
+.data { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 14px 24px; display: flex; flex-direction: column; gap: 12px; }
+.data h2 { margin: 6px 0 0; font-family: var(--font-display); font-weight: 800; font-size: 22px; }
+.tablewrap { overflow-x: auto; border: 1.5px solid var(--line); border-radius: 10px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { padding: 9px 12px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+th:first-child, td:first-child { text-align: left; }
+thead th { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border-bottom: 1.5px solid var(--line); }
+tbody tr + tr td { border-top: 1px solid var(--line); }
+.lines { margin: 0; display: grid; gap: 4px; font-size: 15px; }
+.lines div { display: flex; justify-content: space-between; gap: 12px; }
+.lines dt { font-weight: 600; } .lines dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
+.fine { margin: 0; font-size: 13px; color: var(--muted); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+textarea { width: 100%; min-height: 90px; background: var(--panel); color: var(--ink); border: 1.5px solid var(--line); border-radius: 10px; padding: 10px; font: 12px ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<div id="app" data-mode="scan">
+  <header class="top">
+    <h1>Banana Picker</h1>
+    <div class="seg" role="group" aria-label="Mode">
+      <button type="button" id="tabScan" aria-pressed="true">Scan</button>
+      <button type="button" id="tabTrain" aria-pressed="false">Train</button>
+      <button type="button" id="tabData" aria-pressed="false">Data</button>
+    </div>
+  </header>
+
+  <div class="stagewrap" id="stagewrap">
+    <div class="stage" id="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <div class="reticle pending" id="reticle" data-verdict="none"></div>
+      <div class="sizebtns">
+        <button type="button" id="bigger" aria-label="Bigger box">+</button>
+        <button type="button" id="smaller" aria-label="Smaller box">&minus;</button>
+      </div>
+      <div class="chip" id="chip" hidden></div>
+      <div class="startcard" id="startCard">
+        <h2>Point at one banana</h2>
+        <p>The box reads the banana live. Tap the picture to move the box. Video is analyzed on this phone and never leaves it.</p>
+        <button type="button" class="btn primary" id="startBtn">Start camera</button>
+        <p class="err" id="camErr" hidden></p>
+      </div>
+    </div>
+  </div>
+
+  <section class="sheet" id="sheet" data-verdict="none" aria-live="polite">
+    <div class="vhead"><p class="v-kicker" id="vKicker">Verdict</p><span class="v-lock" id="vLock"></span></div>
+    <h2 class="v-title pending" id="vTitle">Waiting for camera</h2>
+    <p class="v-why" id="vWhy">Start the camera, then aim the box at one banana.</p>
+    <p class="v-note" id="vNote" hidden></p>
+    <div class="meters">
+      <div class="meter"><span>Yellow</span><div class="track"><div class="fill y" id="fY"></div></div><output id="oY">0%</output></div>
+      <div class="meter"><span>Green</span><div class="track"><div class="fill g" id="fG"></div><i class="tick" id="tG1"></i><i class="tick" id="tG2"></i><i class="tick" id="tG3"></i></div><output id="oG">0%</output></div>
+      <div class="meter"><span>Brown</span><div class="track"><div class="fill b" id="fB"></div><i class="tick" id="tB"></i></div><output id="oB">0.0%</output></div>
+    </div>
+
+    <div id="panelScan" class="panelbox" style="display:flex;flex-direction:column;gap:8px">
+      <div class="actions"><button type="button" class="btn primary" id="addBtn" disabled>Put in basket</button></div>
+      <ul class="slots">
+        <li class="slot" data-slot="today"><b>Today</b><span>Needed</span></li>
+        <li class="slot" data-slot="tomorrow"><b>Tomorrow</b><span>Needed</span></li>
+        <li class="slot" data-slot="dayafter"><b>Day after</b><span>Optional</span></li>
+      </ul>
+      <p class="basket-note" id="basketNote"></p>
+    </div>
+
+    <div id="panelTrain" class="panelbox" style="display:none;flex-direction:column;gap:8px">
+      <div class="labels">
+        <button type="button" class="lab" data-label="today" disabled>Today</button>
+        <button type="button" class="lab" data-label="tomorrow" disabled>Tomorrow</button>
+        <button type="button" class="lab" data-label="dayafter" disabled>Day after</button>
+        <button type="button" class="lab" data-label="reject" disabled>Reject</button>
+      </div>
+      <p class="status" id="status"></p>
+    </div>
+  </section>
+
+  <section class="data" id="dataPanel" hidden>
+    <h2>What it has learned</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Group</th><th>Samples</th><th>Avg green</th><th>Avg brown</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <dl class="lines" id="lines"></dl>
+    <p class="fine" id="usingDefaults"></p>
+    <div class="row">
+      <button type="button" class="link" id="undoBtn">Undo last sample</button>
+      <button type="button" class="link" id="clearBtn">Clear all training</button>
+      <button type="button" class="link" id="basketClear">Empty basket</button>
+    </div>
+    <h2>Backup</h2>
+    <p class="fine">Training lives in this app on this phone. Copy a backup now and then. To restore, paste a backup into the box and tap Restore.</p>
+    <textarea id="bk" aria-label="Backup text" spellcheck="false"></textarea>
+    <div class="row">
+      <button type="button" class="btn" id="bkCopy">Copy backup</button>
+      <button type="button" class="btn" id="bkRestore">Restore</button>
+    </div>
+    <p class="fine" id="bkStatus"></p>
+  </section>
+</div>
+
+<script>
+/*CORE*/
+var DEFAULTS = { today: 3, tomorrow: 14, dayafter: 32, brownLimit: 2.5 };
+var NAMES = { today: 'Today banana', tomorrow: 'Tomorrow banana', dayafter: 'Day-after banana', skip: 'Skip this one', none: 'No banana in the box' };
+
+function rgb2hsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  var mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn, h = 0;
+  if (d > 0) {
+    if (mx === r) h = 60 * (((g - b) / d) % 6);
+    else if (mx === g) h = 60 * ((b - r) / d + 2);
+    else h = 60 * ((r - g) / d + 4);
+  }
+  if (h < 0) h += 360;
+  return [h, mx === 0 ? 0 : d / mx, mx];
+}
+
+// Reads a whole RGBA image (the sampled reticle area). Peel-colored pixels (yellow through
+// green) give the green share; dark orange-brown pixels inside peel count as brown spotting.
+// glare is the share of near-white pixels.
+function analyze(data, W, H) {
+  var n = W * H, ban = new Uint8Array(n), brn = new Uint8Array(n);
+  var N = 0, gsum = 0, glare = 0, x, y, i;
+  for (y = 0; y < H; y++) {
+    for (x = 0; x < W; x++) {
+      var p = (y * W + x) * 4;
+      var hsv = rgb2hsv(data[p], data[p + 1], data[p + 2]);
+      var h = hsv[0], s = hsv[1], v = hsv[2];
+      i = y * W + x;
+      if (s < 0.12 && v > 0.92) glare++;
+      if (h >= 42 && h <= 150 && s >= 0.3 && v >= 0.3) {
+        ban[i] = 1; N++;
+        gsum += h <= 56 ? 0 : (h >= 78 ? 1 : (h - 56) / 22);
+      } else if (h >= 12 && h <= 40 && s >= 0.35 && v >= 0.12 && v < 0.6) {
+        brn[i] = 1;
+      }
+    }
+  }
+  if (N < Math.max(60, 0.02 * n)) return null;
+  var S = new Int32Array((W + 1) * (H + 1));
+  for (y = 0; y < H; y++) {
+    var row = 0;
+    for (x = 0; x < W; x++) {
+      row += ban[y * W + x];
+      S[(y + 1) * (W + 1) + x + 1] = S[y * (W + 1) + x + 1] + row;
+    }
+  }
+  var R = 5, brown = 0;
+  for (y = 0; y < H; y++) {
+    for (x = 0; x < W; x++) {
+      if (!brn[y * W + x]) continue;
+      var x0 = Math.max(0, x - R), x1 = Math.min(W, x + R + 1);
+      var y0 = Math.max(0, y - R), y1 = Math.min(H, y + R + 1);
+      var sum = S[y1 * (W + 1) + x1] - S[y0 * (W + 1) + x1] - S[y1 * (W + 1) + x0] + S[y0 * (W + 1) + x0];
+      if (sum >= 0.15 * (x1 - x0) * (y1 - y0)) brown++;
+    }
+  }
+  var green = 100 * gsum / N;
+  return { green: green, yellow: 100 - green, brown: 100 * brown / (N + brown), glare: 100 * glare / n, n: N };
+}
+
+function mean(a) { var s = 0; for (var i = 0; i < a.length; i++) s += a[i]; return s / a.length; }
+function median(a) { var b = a.slice().sort(function (p, q) { return p - q; }), m = b.length >> 1; return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; }
+
+function buildModel(samples) {
+  var by = { today: [], tomorrow: [], dayafter: [], reject: [] };
+  samples.forEach(function (s) { if (by[s.label]) by[s.label].push(s); });
+  var acc = by.today.concat(by.tomorrow, by.dayafter);
+  var accMax = acc.length ? Math.max.apply(null, acc.map(function (s) { return s.brown; })) : null;
+  var brownLimit = DEFAULTS.brownLimit;
+  if (accMax !== null) brownLimit = accMax * 1.3 + 0.5;
+  var rejBrown = by.reject.filter(function (s) { return s.brown > 1; }).map(function (s) { return s.brown; });
+  if (rejBrown.length) {
+    var rmin = Math.min.apply(null, rejBrown);
+    if (accMax === null) brownLimit = rmin * 0.8;
+    else if (rmin > accMax) brownLimit = (accMax + rmin) / 2;
+  }
+  brownLimit = Math.min(8, Math.max(1, brownLimit));
+  var keys = ['today', 'tomorrow', 'dayafter'];
+  var c = keys.map(function (k) { return by[k].length ? mean(by[k].map(function (s) { return s.green; })) : DEFAULTS[k]; });
+  c[1] = Math.max(c[1], c[0] + 2);
+  c[2] = Math.max(c[2], c[1] + 2);
+  var tooGreen = c[2] + Math.max(8, (c[2] - c[1]) * 0.9);
+  var greenRej = by.reject.filter(function (s) { return s.brown <= brownLimit; }).map(function (s) { return s.green; });
+  if (greenRej.length) { var gm = mean(greenRej); if (gm > c[2]) tooGreen = (c[2] + gm) / 2; }
+  var untrained = keys.filter(function (k) { return !by[k].length; });
+  return { c: c, b1: (c[0] + c[1]) / 2, b2: (c[1] + c[2]) / 2, tooGreen: tooGreen, brownLimit: brownLimit, by: by, untrained: untrained };
+}
+
+function decide(f, m) {
+  var r1 = function (x) { return (Math.round(x * 10) / 10).toFixed(1); };
+  var r0 = function (x) { return String(Math.round(x)); };
+  if (f.brown > m.brownLimit) {
+    return { key: 'skip', why: 'Brown spotting reads ' + r1(f.brown) + '%, over your ' + r1(m.brownLimit) + '% limit.', note: f.brown < m.brownLimit + 0.5 ? 'Close to the limit. Turn the banana over and look again.' : '' };
+  }
+  if (f.green > m.tooGreen) {
+    return { key: 'skip', why: 'Too green at ' + r0(f.green) + '%. Your Day-after group tops out near ' + r0(m.tooGreen) + '%.', note: '' };
+  }
+  var key, edge, near;
+  if (f.green < m.b1) { key = 'today'; edge = m.b1 - f.green; near = 'Tomorrow'; }
+  else if (f.green < m.b2) { key = 'tomorrow'; edge = Math.min(f.green - m.b1, m.b2 - f.green); near = (f.green - m.b1 < m.b2 - f.green) ? 'Today' : 'Day-after'; }
+  else { key = 'dayafter'; edge = Math.min(f.green - m.b2, m.tooGreen - f.green); near = (f.green - m.b2 < m.tooGreen - f.green) ? 'Tomorrow' : 'too-green'; }
+  var when = { today: 'Ripe now. Eat it today.', tomorrow: 'Ripe by tomorrow.', dayafter: 'Ripe in two days.' }[key];
+  var note = edge < 2.5 ? 'Borderline, close to the ' + near + ' line. Trust your eye.' : '';
+  if (!note && f.brown > 0.75 * m.brownLimit) note = 'Brown is getting close to your limit.';
+  return { key: key, why: r0(f.green) + '% green, ' + r1(f.brown) + '% brown. ' + when, note: note };
+}
+/*ENDCORE*/
+
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var LABELS = { today: 'Today', tomorrow: 'Tomorrow', dayafter: 'Day after', reject: 'Reject' };
+  var WC = 200, BUF = 8;
+  var st = {
+    mode: 'scan', samples: [], model: buildModel([]), size: 0.55, cx: 0.5, cy: 0.5,
+    buf: [], nulls: 0, sm: null, dec: null, locked: false, running: false, stream: null, wake: null,
+    basket: { today: false, tomorrow: false, dayafter: false }, cooldown: false
+  };
+  var video = $('video'), stage = $('stage'), reticle = $('reticle');
+  var work = document.createElement('canvas'), wctx = work.getContext('2d', { willReadFrequently: true });
+  var timer = null;
+  function r0(x) { return String(Math.round(x)); }
+  function r1(x) { return (Math.round(x * 10) / 10).toFixed(1); }
+
+  /* ----- reticle geometry (screen px) and its mapping into video pixels ----- */
+  function boxScreen() {
+    var sw = stage.clientWidth, sh = stage.clientHeight;
+    var bw = Math.min(sw, Math.max(70, st.size * sw)), bh = Math.min(sh, bw * 0.75);
+    var bx = Math.min(Math.max(0, st.cx * sw - bw / 2), sw - bw);
+    var by = Math.min(Math.max(0, st.cy * sh - bh / 2), sh - bh);
+    return { bx: bx, by: by, bw: bw, bh: bh, sw: sw, sh: sh };
+  }
+  function layoutReticle() {
+    var b = boxScreen();
+    reticle.style.left = b.bx + 'px'; reticle.style.top = b.by + 'px';
+    reticle.style.width = b.bw + 'px'; reticle.style.height = b.bh + 'px';
+  }
+  function sampleFrame() {
+    var vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return null;
+    var b = boxScreen(), s = Math.max(b.sw / vw, b.sh / vh);
+    var ox = (b.sw - vw * s) / 2, oy = (b.sh - vh * s) / 2;
+    var x = Math.max(0, (b.bx - ox) / s), y = Math.max(0, (b.by - oy) / s);
+    var w = Math.min(vw - x, b.bw / s), h = Math.min(vh - y, b.bh / s);
+    if (w < 8 || h < 8) return null;
+    var hc = Math.max(40, Math.min(300, Math.round(WC * h / w)));
+    if (work.width !== WC) work.width = WC;
+    if (work.height !== hc) work.height = hc;
+    wctx.drawImage(video, x, y, w, h, 0, 0, WC, hc);
+    var img = wctx.getImageData(0, 0, WC, hc);
+    return analyze(img.data, WC, hc);
+  }
+
+  /* ----- one tick of the live loop (about 5 per second) ----- */
+  function tick() {
+    if (!st.running || st.mode === 'data' || video.readyState < 2) return;
+    var f = sampleFrame();
+    if (f) { st.buf.push(f); st.nulls = 0; } else { st.nulls++; if (st.nulls >= 3) st.buf = []; }
+    if (st.buf.length > BUF) st.buf.shift();
+    var b = st.buf;
+    if (b.length >= 3) {
+      var gs = b.map(function (q) { return q.green; });
+      st.sm = { green: median(gs), brown: mean(b.map(function (q) { return q.brown; })), glare: mean(b.map(function (q) { return q.glare; })) };
+      st.sm.yellow = 100 - st.sm.green;
+      var last = gs.slice(-6);
+      st.locked = b.length >= 6 && (Math.max.apply(null, last) - Math.min.apply(null, last)) <= 8;
+      st.dec = decide(st.sm, st.model);
+    } else { st.sm = null; st.dec = null; st.locked = false; }
+    renderLive();
+  }
+
+  /* ----- rendering ----- */
+  function setBar(id, pct, scale) { $(id).style.width = Math.max(0, Math.min(100, pct / scale * 100)) + '%'; }
+  function setTick(id, pct, scale) { $(id).style.left = 'calc(' + Math.max(0, Math.min(100, pct / scale * 100)) + '% - 1px)'; }
+  function renderLive() {
+    var sh = $('sheet'), m = st.model, sm = st.sm, d = st.dec;
+    $('vKicker').textContent = st.mode === 'train' ? 'Current guess' : 'Verdict';
+    setTick('tG1', m.b1, 100); setTick('tG2', m.b2, 100); setTick('tG3', m.tooGreen, 100); setTick('tB', m.brownLimit, 10);
+    var chip = $('chip');
+    if (!st.running) {
+      sh.dataset.verdict = 'none'; reticle.dataset.verdict = 'none'; reticle.classList.add('pending');
+      $('vTitle').textContent = 'Waiting for camera'; $('vTitle').classList.add('pending');
+      $('vWhy').textContent = 'Start the camera, then aim the box at one banana.';
+      $('vNote').hidden = true; $('vLock').textContent = ''; chip.hidden = true;
+    } else if (!sm) {
+      sh.dataset.verdict = 'none'; reticle.dataset.verdict = 'none'; reticle.classList.add('pending');
+      $('vTitle').textContent = NAMES.none; $('vTitle').classList.add('pending');
+      $('vWhy').textContent = 'Aim the box at one banana. Keep shelf and neighbors out of it.';
+      $('vNote').hidden = true; $('vLock').textContent = ''; chip.hidden = true;
+      setBar('fY', 0, 100); setBar('fG', 0, 100); setBar('fB', 0, 10);
+      $('oY').textContent = '0%'; $('oG').textContent = '0%'; $('oB').textContent = '0.0%';
+    } else {
+      sh.dataset.verdict = d.key; reticle.dataset.verdict = d.key;
+      reticle.classList.toggle('pending', !st.locked);
+      $('vTitle').textContent = NAMES[d.key]; $('vTitle').classList.toggle('pending', !st.locked);
+      $('vWhy').textContent = d.why;
+      var note = st.locked ? d.note : 'Hold steady for a second.';
+      $('vNote').hidden = !note; $('vNote').textContent = note;
+      $('vLock').textContent = st.locked ? 'Locked' : 'Reading';
+      setBar('fY', sm.yellow, 100); setBar('fG', sm.green, 100); setBar('fB', sm.brown, 10);
+      $('oY').textContent = r0(sm.yellow) + '%'; $('oG').textContent = r0(sm.green) + '%'; $('oB').textContent = r1(sm.brown) + '%';
+      if (sm.glare > 12) { chip.hidden = false; chip.textContent = 'Glare on the peel. Tilt the banana.'; } else { chip.hidden = true; }
+    }
+    renderActions();
+  }
+  function renderActions() {
+    var d = st.dec, ok = st.running && st.sm && st.locked;
+    var add = $('addBtn');
+    if (!st.running) { add.disabled = true; add.textContent = 'Start the camera to scan'; }
+    else if (!ok) { add.disabled = true; add.textContent = 'Hold steady on one banana'; }
+    else if (d.key === 'skip') { add.disabled = true; add.textContent = 'Skip this one, scan another'; }
+    else if (st.basket[d.key]) { add.disabled = true; add.textContent = 'Already have a ' + LABELS[d.key] + ' banana'; }
+    else { add.disabled = false; add.textContent = 'Put in basket as ' + LABELS[d.key]; }
+    document.querySelectorAll('.lab').forEach(function (b) { b.disabled = !(ok && !st.cooldown); });
+  }
+  function renderBasket() {
+    ['today', 'tomorrow', 'dayafter'].forEach(function (k) {
+      var li = document.querySelector('.slot[data-slot="' + k + '"]');
+      li.classList.toggle('full', st.basket[k]);
+      li.querySelector('span').textContent = st.basket[k] ? 'In basket' : (k === 'dayafter' ? 'Optional' : 'Needed');
+    });
+    var need = [];
+    if (!st.basket.today) need.push('Today');
+    if (!st.basket.tomorrow) need.push('Tomorrow');
+    $('basketNote').textContent = need.length
+      ? 'Still need: ' + need.join(' and ') + '.' + (st.basket.dayafter ? '' : ' Day after is optional.')
+      : (st.basket.dayafter ? 'Basket complete. Head to checkout.' : 'Basket complete. Add a Day-after banana if you want one, or head to checkout.');
+  }
+  function renderData() {
+    var m = st.model, rows = '';
+    ['today', 'tomorrow', 'dayafter', 'reject'].forEach(function (k) {
+      var a = m.by[k];
+      rows += '<tr><td>' + LABELS[k] + '</td><td>' + a.length + '</td><td>' +
+        (a.length ? r0(mean(a.map(function (s) { return s.green; }))) + '%' : '-') + '</td><td>' +
+        (a.length ? r1(mean(a.map(function (s) { return s.brown; }))) + '%' : '-') + '</td></tr>';
+    });
+    $('tbody').innerHTML = rows;
+    $('lines').innerHTML =
+      '<div><dt>Today</dt><dd>under ' + r0(m.b1) + '% green</dd></div>' +
+      '<div><dt>Tomorrow</dt><dd>' + r0(m.b1) + ' to ' + r0(m.b2) + '% green</dd></div>' +
+      '<div><dt>Day after</dt><dd>' + r0(m.b2) + ' to ' + r0(m.tooGreen) + '% green</dd></div>' +
+      '<div><dt>Skip</dt><dd>over ' + r0(m.tooGreen) + '% green or ' + r1(m.brownLimit) + '% brown</dd></div>';
+    $('usingDefaults').textContent = m.untrained.length
+      ? 'Starting values are in use for: ' + m.untrained.map(function (k) { return LABELS[k]; }).join(', ') + '.'
+      : 'All three groups are trained from your samples.';
+    $('undoBtn').disabled = !st.samples.length; $('clearBtn').disabled = !st.samples.length;
+  }
+  function renderMode() {
+    ['scan', 'train', 'data'].forEach(function (k) { $('tab' + k[0].toUpperCase() + k.slice(1)).setAttribute('aria-pressed', st.mode === k); });
+    var dataMode = st.mode === 'data';
+    $('stagewrap').hidden = dataMode; $('sheet').hidden = dataMode; $('dataPanel').hidden = !dataMode;
+    $('panelScan').style.display = st.mode === 'scan' ? 'flex' : 'none';
+    $('panelTrain').style.display = st.mode === 'train' ? 'flex' : 'none';
+    if (dataMode) renderData(); else layoutReticle();
+    renderLive();
+  }
+
+  /* ----- storage ----- */
+  function persist() { try { localStorage.setItem('bananaSamples', JSON.stringify(st.samples.slice(-300))); } catch (e) {} }
+  function loadLocal() { try { var a = JSON.parse(localStorage.getItem('bananaSamples') || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+  function setSamples(arr) { st.samples = arr; st.model = buildModel(arr); }
+
+  /* ----- camera ----- */
+  async function requestWake() { try { if ('wakeLock' in navigator) st.wake = await navigator.wakeLock.request('screen'); } catch (e) {} }
+  async function startCamera() {
+    var err = $('camErr'); err.hidden = true;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      err.hidden = false; err.textContent = 'This browser cannot open the camera. Open the page in Safari over https.'; return;
+    }
+    try {
+      st.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      video.srcObject = st.stream;
+      await video.play();
+      $('startCard').hidden = true; st.running = true;
+      requestWake(); layoutReticle();
+      if (!timer) timer = setInterval(tick, 200);
+      renderLive();
+    } catch (e) {
+      err.hidden = false;
+      err.textContent = (e && e.name === 'NotAllowedError')
+        ? 'Camera access is off. In Settings, find this app or Safari, allow Camera, then reopen.'
+        : 'The camera could not start (' + (e && e.message ? e.message : 'unknown error') + ').';
+    }
+  }
+
+  /* ----- events ----- */
+  $('startBtn').addEventListener('click', startCamera);
+  $('tabScan').addEventListener('click', function () { st.mode = 'scan'; renderMode(); });
+  $('tabTrain').addEventListener('click', function () { st.mode = 'train'; renderMode(); });
+  $('tabData').addEventListener('click', function () { st.mode = 'data'; renderMode(); });
+  stage.addEventListener('click', function (e) {
+    if (e.target.closest('.sizebtns') || e.target.closest('.startcard')) return;
+    var r = stage.getBoundingClientRect();
+    st.cx = (e.clientX - r.left) / r.width; st.cy = (e.clientY - r.top) / r.height;
+    st.buf = []; layoutReticle();
+  });
+  function resize(delta) { st.size = Math.min(0.95, Math.max(0.25, st.size + delta)); st.buf = []; layoutReticle(); }
+  $('bigger').addEventListener('click', function () { resize(0.08); });
+  $('smaller').addEventListener('click', function () { resize(-0.08); });
+  window.addEventListener('resize', layoutReticle);
+  window.addEventListener('orientationchange', function () { setTimeout(layoutReticle, 250); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && st.running) { requestWake(); video.play().catch(function () {}); }
+  });
+  $('addBtn').addEventListener('click', function () {
+    if (st.dec && st.dec.key !== 'skip' && st.locked) { st.basket[st.dec.key] = true; renderBasket(); renderActions(); }
+  });
+  $('basketClear').addEventListener('click', function () { st.basket = { today: false, tomorrow: false, dayafter: false }; renderBasket(); renderActions(); });
+  document.querySelectorAll('.lab').forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (!st.sm || !st.locked || st.cooldown) return;
+      var k = b.dataset.label;
+      st.samples.push({ label: k, green: Math.round(st.sm.green * 10) / 10, brown: Math.round(st.sm.brown * 10) / 10, t: Date.now() });
+      st.model = buildModel(st.samples); persist();
+      $('status').textContent = 'Saved as ' + LABELS[k] + ' (' + st.model.by[k].length + ' so far). Next banana.';
+      reticle.classList.remove('flash'); void reticle.offsetWidth; reticle.classList.add('flash');
+      st.cooldown = true; st.buf = [];
+      setTimeout(function () { st.cooldown = false; renderActions(); }, 1500);
+      renderLive();
+    });
+  });
+  $('undoBtn').addEventListener('click', function () {
+    if (!st.samples.length) return;
+    st.samples.pop(); setSamples(st.samples); persist(); renderData();
+  });
+  var clearTimer = null;
+  $('clearBtn').addEventListener('click', function () {
+    var b = $('clearBtn');
+    if (!b.dataset.armed) {
+      b.dataset.armed = '1'; b.textContent = 'Tap again to erase all';
+      clearTimer = setTimeout(function () { delete b.dataset.armed; b.textContent = 'Clear all training'; }, 4000);
+      return;
+    }
+    clearTimeout(clearTimer); delete b.dataset.armed; b.textContent = 'Clear all training';
+    setSamples([]); persist(); renderData();
+  });
+  $('bkCopy').addEventListener('click', function () {
+    var ta = $('bk'); ta.value = JSON.stringify(st.samples); ta.focus(); ta.select();
+    var ok = function () { $('bkStatus').textContent = 'Backup copied (' + st.samples.length + ' samples).'; };
+    var fail = function () { $('bkStatus').textContent = 'Select the text above and copy it.'; };
+    try { navigator.clipboard.writeText(ta.value).then(ok, fail); } catch (e) { fail(); }
+  });
+  $('bkRestore').addEventListener('click', function () {
+    try {
+      var a = JSON.parse($('bk').value);
+      var okAll = Array.isArray(a) && a.length > 0 && a.every(function (s) { return s && ['today', 'tomorrow', 'dayafter', 'reject'].indexOf(s.label) >= 0 && isFinite(s.green) && isFinite(s.brown); });
+      if (!okAll) throw new Error('bad');
+      setSamples(a.slice(-300)); persist(); renderData();
+      $('bkStatus').textContent = 'Restored ' + st.samples.length + ' samples.';
+    } catch (e) { $('bkStatus').textContent = 'That text is not a valid backup.'; }
+  });
+
+  /* ----- start ----- */
+  setSamples(loadLocal());
+  renderBasket(); renderMode();
+  if ('serviceWorker' in navigator) { window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); }); }
+})();
+</script>
+</body>
+</html>

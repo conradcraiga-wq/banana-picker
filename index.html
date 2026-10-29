@@ -219,9 +219,16 @@ textarea { width: 100%; min-height: 90px; background: var(--panel); color: var(-
     <p class="fine" id="usingDefaults"></p>
     <div class="row">
       <button type="button" class="link" id="undoBtn">Undo last sample</button>
-      <button type="button" class="link" id="clearBtn">Clear all training</button>
+      <button type="button" class="link" id="clearBtn">Clear my training</button>
       <button type="button" class="link" id="basketClear">Empty basket</button>
     </div>
+    <h2>Starting values from photos</h2>
+    <p class="fine" id="starterNote"></p>
+    <div class="row">
+      <button type="button" class="btn" id="starterLoad">Load photo-based values</button>
+      <button type="button" class="link" id="starterRemove">Remove them</button>
+    </div>
+    <p class="fine" id="starterStatus" aria-live="polite"></p>
     <h2>Backup</h2>
     <p class="fine">Training lives in this app on this phone. Copy a backup now and then. To restore, paste a backup into the box and tap Restore.</p>
     <textarea id="bk" aria-label="Backup text" spellcheck="false"></textarea>
@@ -297,29 +304,61 @@ function analyze(data, W, H) {
 function mean(a) { var s = 0; for (var i = 0; i < a.length; i++) s += a[i]; return s / a.length; }
 function median(a) { var b = a.slice().sort(function (p, q) { return p - q; }), m = b.length >> 1; return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; }
 
+// Best single cut between two groups of green values: fewest misplaced samples, ties go to the middle.
+function bestSplit(lo, hi) {
+  var vals = lo.concat(hi).sort(function (a, b) { return a - b; }), cands = [], i;
+  for (i = 0; i + 1 < vals.length; i++) if (vals[i] < vals[i + 1]) cands.push((vals[i] + vals[i + 1]) / 2);
+  if (!cands.length) return mean(vals);
+  var best = [], bestErr = 1e9;
+  cands.forEach(function (t) {
+    var err = 0;
+    lo.forEach(function (v) { if (v > t) err++; });
+    hi.forEach(function (v) { if (v <= t) err++; });
+    if (err < bestErr) { bestErr = err; best = [t]; } else if (err === bestErr) best.push(t);
+  });
+  return (best[0] + best[best.length - 1]) / 2;
+}
+
+// Turns saved samples into decision lines. Samples tagged src "web" come from labeled photos and are
+// used for a group only until you train that group yourself. Groups with nothing use built-in values.
 function buildModel(samples) {
-  var by = { today: [], tomorrow: [], dayafter: [], reject: [] };
-  samples.forEach(function (s) { if (by[s.label]) by[s.label].push(s); });
+  var KEYS = ['today', 'tomorrow', 'dayafter', 'reject'], live = {}, web = {}, by = {}, fromWeb = {};
+  KEYS.forEach(function (k) { live[k] = []; web[k] = []; });
+  samples.forEach(function (s) { var t = s.src === 'web' ? web : live; if (t[s.label]) t[s.label].push(s); });
+  KEYS.forEach(function (k) { by[k] = live[k].length ? live[k] : web[k]; fromWeb[k] = !live[k].length && web[k].length > 0; });
+  var G = function (k) { return by[k].map(function (s) { return s.green; }); };
   var acc = by.today.concat(by.tomorrow, by.dayafter);
   var accMax = acc.length ? Math.max.apply(null, acc.map(function (s) { return s.brown; })) : null;
+  var rejBrown = by.reject.map(function (s) { return s.brown; });
   var brownLimit = DEFAULTS.brownLimit;
-  if (accMax !== null) brownLimit = accMax * 1.3 + 0.5;
-  var rejBrown = by.reject.filter(function (s) { return s.brown > 1; }).map(function (s) { return s.brown; });
-  if (rejBrown.length) {
-    var rmin = Math.min.apply(null, rejBrown);
-    if (accMax === null) brownLimit = rmin * 0.8;
-    else if (rmin > accMax) brownLimit = (accMax + rmin) / 2;
+  if (accMax !== null) {
+    var above = rejBrown.filter(function (b) { return b > accMax; });
+    brownLimit = above.length ? (accMax + Math.min.apply(null, above)) / 2 : accMax * 1.3 + 0.5;
+  } else {
+    var big = rejBrown.filter(function (b) { return b > 1; });
+    if (big.length) brownLimit = Math.min.apply(null, big) * 0.8;
   }
   brownLimit = Math.min(8, Math.max(1, brownLimit));
   var keys = ['today', 'tomorrow', 'dayafter'];
-  var c = keys.map(function (k) { return by[k].length ? mean(by[k].map(function (s) { return s.green; })) : DEFAULTS[k]; });
+  var c = keys.map(function (k) { return by[k].length ? mean(G(k)) : DEFAULTS[k]; });
   c[1] = Math.max(c[1], c[0] + 2);
   c[2] = Math.max(c[2], c[1] + 2);
-  var tooGreen = c[2] + Math.max(8, (c[2] - c[1]) * 0.9);
-  var greenRej = by.reject.filter(function (s) { return s.brown <= brownLimit; }).map(function (s) { return s.green; });
-  if (greenRej.length) { var gm = mean(greenRej); if (gm > c[2]) tooGreen = (c[2] + gm) / 2; }
+  var b1 = (c[0] + c[1]) / 2, b2 = (c[1] + c[2]) / 2;
+  if (by.today.length >= 2 && by.tomorrow.length >= 2) b1 = bestSplit(G('today'), G('tomorrow'));
+  if (by.tomorrow.length >= 2 && by.dayafter.length >= 2) b2 = bestSplit(G('tomorrow'), G('dayafter'));
+  b2 = Math.max(b2, b1 + 1.5);
+  var tooGreen;
+  if (by.dayafter.length) {
+    var maxDay = Math.max.apply(null, G('dayafter'));
+    var rg = by.reject.filter(function (s) { return s.brown <= brownLimit && s.green > maxDay; }).map(function (s) { return s.green; });
+    tooGreen = rg.length ? (maxDay + Math.min.apply(null, rg)) / 2 : Math.max(maxDay * 1.15, b2 + 8);
+  } else {
+    tooGreen = c[2] + Math.max(8, (c[2] - c[1]) * 0.9);
+    var gr = by.reject.filter(function (s) { return s.brown <= brownLimit; }).map(function (s) { return s.green; });
+    if (gr.length) { var gm = mean(gr); if (gm > c[2]) tooGreen = (c[2] + gm) / 2; }
+  }
   var untrained = keys.filter(function (k) { return !by[k].length; });
-  return { c: c, b1: (c[0] + c[1]) / 2, b2: (c[1] + c[2]) / 2, tooGreen: tooGreen, brownLimit: brownLimit, by: by, untrained: untrained };
+  return { c: c, b1: b1, b2: b2, tooGreen: tooGreen, brownLimit: brownLimit, by: by, fromWeb: fromWeb, untrained: untrained };
 }
 
 function decide(f, m) {
@@ -465,7 +504,7 @@ function decide(f, m) {
     var m = st.model, rows = '';
     ['today', 'tomorrow', 'dayafter', 'reject'].forEach(function (k) {
       var a = m.by[k];
-      rows += '<tr><td>' + LABELS[k] + '</td><td>' + a.length + '</td><td>' +
+      rows += '<tr><td>' + LABELS[k] + (m.fromWeb[k] ? ' (photos)' : '') + '</td><td>' + a.length + '</td><td>' +
         (a.length ? r0(mean(a.map(function (s) { return s.green; }))) + '%' : '-') + '</td><td>' +
         (a.length ? r1(mean(a.map(function (s) { return s.brown; }))) + '%' : '-') + '</td></tr>';
     });
@@ -475,10 +514,14 @@ function decide(f, m) {
       '<div><dt>Tomorrow</dt><dd>' + r0(m.b1) + ' to ' + r0(m.b2) + '% green</dd></div>' +
       '<div><dt>Day after</dt><dd>' + r0(m.b2) + ' to ' + r0(m.tooGreen) + '% green</dd></div>' +
       '<div><dt>Skip</dt><dd>over ' + r0(m.tooGreen) + '% green or ' + r1(m.brownLimit) + '% brown</dd></div>';
-    $('usingDefaults').textContent = m.untrained.length
-      ? 'Starting values are in use for: ' + m.untrained.map(function (k) { return LABELS[k]; }).join(', ') + '.'
-      : 'All three groups are trained from your samples.';
-    $('undoBtn').disabled = !st.samples.length; $('clearBtn').disabled = !st.samples.length;
+    var wg = ['today', 'tomorrow', 'dayafter'].filter(function (k) { return m.fromWeb[k]; }), parts = [];
+    var nm = function (k) { return LABELS[k]; };
+    if (wg.length) parts.push('Photo-based values are in use for: ' + wg.map(nm).join(', ') + '. Train those groups on your phone to replace them.');
+    if (m.untrained.length) parts.push('Built-in starting values are in use for: ' + m.untrained.map(nm).join(', ') + '.');
+    $('usingDefaults').textContent = parts.length ? parts.join(' ') : 'All three groups are trained from your own samples.';
+    var own = st.samples.some(function (s) { return !isWeb(s); });
+    $('undoBtn').disabled = !own; $('clearBtn').disabled = !own;
+    renderStarter();
   }
   function renderMode() {
     ['scan', 'train', 'data'].forEach(function (k) { $('tab' + k[0].toUpperCase() + k.slice(1)).setAttribute('aria-pressed', st.mode === k); });
@@ -491,7 +534,11 @@ function decide(f, m) {
   }
 
   /* ----- storage ----- */
-  function persist() { try { localStorage.setItem('bananaSamples', JSON.stringify(st.samples.slice(-300))); } catch (e) {} }
+  function isWeb(s) { return s && s.src === 'web'; }
+  function persist() {
+    var keep = st.samples.filter(isWeb).concat(st.samples.filter(function (s) { return !isWeb(s); }).slice(-300));
+    try { localStorage.setItem('bananaSamples', JSON.stringify(keep)); } catch (e) {}
+  }
   function loadLocal() { try { var a = JSON.parse(localStorage.getItem('bananaSamples') || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
   function setSamples(arr) { st.samples = arr; st.model = buildModel(arr); }
 
@@ -555,19 +602,21 @@ function decide(f, m) {
     });
   });
   $('undoBtn').addEventListener('click', function () {
-    if (!st.samples.length) return;
-    st.samples.pop(); setSamples(st.samples); persist(); renderData();
+    var i = st.samples.length - 1;
+    while (i >= 0 && isWeb(st.samples[i])) i--;
+    if (i < 0) return;
+    st.samples.splice(i, 1); setSamples(st.samples); persist(); renderData();
   });
   var clearTimer = null;
   $('clearBtn').addEventListener('click', function () {
     var b = $('clearBtn');
     if (!b.dataset.armed) {
       b.dataset.armed = '1'; b.textContent = 'Tap again to erase all';
-      clearTimer = setTimeout(function () { delete b.dataset.armed; b.textContent = 'Clear all training'; }, 4000);
+      clearTimer = setTimeout(function () { delete b.dataset.armed; b.textContent = 'Clear my training'; }, 4000);
       return;
     }
-    clearTimeout(clearTimer); delete b.dataset.armed; b.textContent = 'Clear all training';
-    setSamples([]); persist(); renderData();
+    clearTimeout(clearTimer); delete b.dataset.armed; b.textContent = 'Clear my training';
+    setSamples(st.samples.filter(isWeb)); persist(); renderData();
   });
   $('bkCopy').addEventListener('click', function () {
     var ta = $('bk'); ta.value = JSON.stringify(st.samples); ta.focus(); ta.select();
@@ -583,6 +632,44 @@ function decide(f, m) {
       setSamples(a.slice(-300)); persist(); renderData();
       $('bkStatus').textContent = 'Restored ' + st.samples.length + ' samples.';
     } catch (e) { $('bkStatus').textContent = 'That text is not a valid backup.'; }
+  });
+
+  /* ----- photo-based starting values ----- */
+  var starterTimer = null;
+  function starterMsg(x) { $('starterStatus').textContent = x; }
+  function renderStarter() {
+    var n = st.samples.filter(isWeb).length;
+    $('starterNote').textContent = n
+      ? n + ' photo-based samples are loaded. They set your starting lines until you train a group yourself.'
+      : 'Load starting values learned from 80 labeled photos of real bananas. They set your starting lines until you train a group yourself.';
+    $('starterLoad').textContent = n ? 'Reload photo-based values' : 'Load photo-based values';
+    $('starterRemove').disabled = !n;
+  }
+  async function loadStarter() {
+    starterMsg('Loading');
+    try {
+      var r = await fetch('starter-training.json', { cache: 'no-store' });
+      if (!r.ok) throw new Error('http ' + r.status);
+      var j = await r.json();
+      var good = (Array.isArray(j.samples) ? j.samples : []).filter(function (s) {
+        return s && ['today', 'tomorrow', 'dayafter', 'reject'].indexOf(s.label) >= 0 && isFinite(s.green) && isFinite(s.brown);
+      });
+      if (!good.length) throw new Error('empty');
+      var web = good.map(function (s) { return { label: s.label, green: +s.green, brown: +s.brown, src: 'web' }; });
+      setSamples(web.concat(st.samples.filter(function (s) { return !isWeb(s); }))); persist(); renderData();
+      starterMsg('Loaded ' + web.length + ' photo-based samples.');
+    } catch (e) { starterMsg('Could not load the starting values. Check your connection and try again.'); }
+  }
+  $('starterLoad').addEventListener('click', loadStarter);
+  $('starterRemove').addEventListener('click', function () {
+    var b = $('starterRemove');
+    if (!b.dataset.armed) {
+      b.dataset.armed = '1'; b.textContent = 'Tap again to remove';
+      starterTimer = setTimeout(function () { delete b.dataset.armed; b.textContent = 'Remove them'; }, 4000);
+      return;
+    }
+    clearTimeout(starterTimer); delete b.dataset.armed; b.textContent = 'Remove them';
+    setSamples(st.samples.filter(function (s) { return !isWeb(s); })); persist(); renderData(); starterMsg('Photo-based values removed.');
   });
 
   /* ----- start ----- */

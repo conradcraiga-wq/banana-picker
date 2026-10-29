@@ -7,3 +7,5 @@ Everything runs in the browser. The camera video is analyzed on the device and i
 `starter-training.json` holds numbers only (green and brown shares and a label) measured from 80 photos in github.com/psolymos/bananas (MIT License, Copyright 2022 Peter Solymos). No images are included.
 
 Add it to the iPhone Home Screen from Safari (Share, then Add to Home Screen) and open it from there.
+
+The stem and tip of each banana are dark by nature, so the app finds the long axis of the banana and ignores the outer 12% at each end before measuring green and brown. An end that runs off the edge of the box is not trimmed.
